@@ -1,6 +1,6 @@
 {
     "name": "@yume-chan/android-bin",
-    "version": "2.1.0",
+    "version": "3.0.0-beta.4",
     "description": "Wrappers for Android built-in executables.",
     "keywords": [
         "adb",
@@ -26,22 +26,21 @@
     "types": "esm/index.d.ts",
     "sideEffects": false,
     "scripts": {
-        "build": "tsc -b tsconfig.build.json",
-        "lint": "run-eslint && prettier src/**/*.ts --write --tab-width 4",
+        "build": "tsc -p tsconfig.build.json",
+        "lint": "run-lint",
         "prepublishOnly": "npm run build",
         "test": "run-test"
     },
     "dependencies": {
-        "@yume-chan/adb": "workspace:^",
-        "@yume-chan/stream-extra": "workspace:^",
-        "@yume-chan/struct": "workspace:^"
+        "@yume-chan/adb": "workspace:*",
+        "@yume-chan/stream-extra": "workspace:*",
+        "@yume-chan/struct": "workspace:*"
     },
     "devDependencies": {
-        "@types/node": "^25.5.2",
-        "@yume-chan/eslint-config": "workspace:^",
+        "@types/node": "^26.6.4",
+        "@yume-chan/lint": "workspace:^",
         "@yume-chan/test-runner": "workspace:^",
         "@yume-chan/tsconfig": "workspace:^",
-        "prettier": "^3.8.1",
-        "typescript": "^5.9.3"
+        "typescript": "^6.0.3"
     }
 }

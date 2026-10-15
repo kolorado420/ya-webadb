@@ -1,6 +1,6 @@
 {
     "name": "@yume-chan/scrcpy-decoder-webcodecs",
-    "version": "2.1.0",
+    "version": "3.0.0-beta.4",
     "description": "Raw H.264 stream decoder and renderer using WebCodecs API (requires modern browser).",
     "keywords": [
         "adb",
@@ -28,23 +28,22 @@
     "types": "esm/index.d.ts",
     "sideEffects": false,
     "scripts": {
-        "build": "tsc -b tsconfig.build.json",
-        "lint": "run-eslint && prettier src/**/*.ts --write --tab-width 4",
+        "build": "tsc -p tsconfig.build.json",
+        "lint": "run-lint",
         "prepublishOnly": "npm run build"
     },
     "dependencies": {
         "@yume-chan/async": "^4.1.3",
-        "@yume-chan/event": "workspace:^",
-        "@yume-chan/media-codec": "workspace:^",
-        "@yume-chan/no-data-view": "workspace:^",
-        "@yume-chan/scrcpy": "workspace:^",
-        "@yume-chan/scrcpy-decoder-shared": "workspace:^",
-        "@yume-chan/stream-extra": "workspace:^"
+        "@yume-chan/event": "workspace:*",
+        "@yume-chan/media-codec": "workspace:*",
+        "@yume-chan/no-data-view": "workspace:*",
+        "@yume-chan/scrcpy": "workspace:*",
+        "@yume-chan/scrcpy-decoder-shared": "workspace:*",
+        "@yume-chan/stream-extra": "workspace:*"
     },
     "devDependencies": {
-        "@yume-chan/eslint-config": "workspace:^",
+        "@yume-chan/lint": "workspace:^",
         "@yume-chan/tsconfig": "workspace:^",
-        "prettier": "^3.8.1",
-        "typescript": "^5.9.3"
+        "typescript": "^6.0.3"
     }
 }

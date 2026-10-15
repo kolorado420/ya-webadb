@@ -1,28 +1,29 @@
+import commonjs from "@rollup/plugin-commonjs";
 import node from "@rollup/plugin-node-resolve";
 import terser from "@rollup/plugin-terser";
-import typescript from "@rollup/plugin-typescript";
 import { defineConfig } from "rollup";
+
+const terserPlugin = terser({
+    module: true,
+    format: {
+        beautify: true,
+    },
+    compress: {
+        passes: 10,
+    },
+    mangle: false,
+});
 
 export default defineConfig({
     input: "src/index.js",
+    external: ["yuv-canvas"],
+    treeshake: {
+        manualPureFunctions: ["FinalizationRegistry"],
+    },
     experimentalLogSideEffects: true,
     output: {
-        name: "index",
-        file: "dist/index.js",
+        dir: "dist",
         format: "esm",
     },
-    plugins: [
-        typescript(),
-        node(),
-        terser({
-            module: true,
-            format: {
-                beautify: true,
-            },
-            compress: {
-                passes: 10,
-            },
-            mangle: false,
-        }),
-    ],
+    plugins: [node(), commonjs(), terserPlugin],
 });

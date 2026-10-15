@@ -279,8 +279,8 @@ export class PackageManager {
         const filePath = `/data/local/tmp/${fileName}.apk`;
 
         await this.#adb.sync.write({
-            filename: filePath,
-            file: stream,
+            path: filePath,
+            readable: stream,
         });
 
         try {
@@ -291,7 +291,7 @@ export class PackageManager {
     }
 
     async installStream(
-        size: number,
+        size: number | bigint,
         stream: ReadableStream<MaybeConsumable<Uint8Array>>,
         options?: PackageManager.InstallOptions,
     ): Promise<void> {
@@ -584,7 +584,7 @@ export class PackageManager {
     async sessionAddSplitStream(
         sessionId: number,
         splitName: string,
-        size: number,
+        size: number | bigint,
         stream: ReadableStream<MaybeConsumable<Uint8Array>>,
     ): Promise<void> {
         const command: string[] = [
@@ -646,8 +646,7 @@ export class PackageManager {
 export namespace PackageManager {
     export type InstallOptions = {
         [K in keyof typeof InstallOptionsDefinitions]?:
-            | (typeof InstallOptionsDefinitions)[K]["type"]
-            | undefined;
+            (typeof InstallOptionsDefinitions)[K]["type"] | undefined;
     };
 
     export interface ListPackagesOptions {
@@ -718,7 +717,7 @@ export class PackageManagerInstallSession {
 
     addSplitStream(
         splitName: string,
-        size: number,
+        size: number | bigint,
         stream: ReadableStream<MaybeConsumable<Uint8Array>>,
     ): Promise<void> {
         return this.#packageManager.sessionAddSplitStream(

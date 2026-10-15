@@ -1,12 +1,13 @@
 import type { Adb, AdbNoneProtocolProcess } from "@yume-chan/adb";
 import { AdbReverseNotSupportedError } from "@yume-chan/adb";
 import type {
+    MapBoolean,
     ScrcpyAudioStreamDisabledMetadata,
     ScrcpyAudioStreamErroredMetadata,
+    ScrcpyAudioStreamPacket,
     ScrcpyAudioStreamSuccessMetadata,
     ScrcpyDisplay,
     ScrcpyEncoder,
-    ScrcpyMediaStreamPacket,
     ScrcpyOptions1_15,
 } from "@yume-chan/scrcpy";
 import {
@@ -86,15 +87,14 @@ interface AdbScrcpyClientInit<TOptions extends AdbScrcpyOptions<object>> {
     videoStream: ReadableStream<Uint8Array> | undefined;
     audioStream: ReadableStream<Uint8Array> | undefined;
     controlStream:
-        | ReadableWritablePair<Uint8Array, Consumable<Uint8Array>>
-        | undefined;
+        ReadableWritablePair<Uint8Array, Consumable<Uint8Array>> | undefined;
 }
 
 export interface AdbScrcpyAudioStreamSuccessMetadata extends Omit<
     ScrcpyAudioStreamSuccessMetadata,
     "stream"
 > {
-    readonly stream: ReadableStream<ScrcpyMediaStreamPacket>;
+    readonly stream: ReadableStream<ScrcpyAudioStreamPacket>;
 }
 
 export type AdbScrcpyAudioStreamMetadata =
@@ -106,11 +106,11 @@ export class AdbScrcpyClient<TOptions extends AdbScrcpyOptions<object>> {
     static async pushServer(
         adb: Adb,
         file: ReadableStream<MaybeConsumable<Uint8Array>>,
-        filename = DefaultServerPath,
+        path = DefaultServerPath,
     ) {
         await adb.sync.write({
-            filename,
-            file,
+            path,
+            readable: file,
         });
     }
 
@@ -238,6 +238,10 @@ export class AdbScrcpyClient<TOptions extends AdbScrcpyOptions<object>> {
     }
 
     #options: TOptions;
+    get options() {
+        return this.#options;
+    }
+
     #process: AdbNoneProtocolProcess;
 
     #output: ReadableStream<string>;
@@ -259,11 +263,11 @@ export class AdbScrcpyClient<TOptions extends AdbScrcpyOptions<object>> {
      * Note: if it's not `undefined`, it must be consumed to prevent
      * the connection from being blocked.
      */
-    get videoStream(): TOptions["value"] extends { video: infer T }
-        ? T extends false
-            ? undefined
-            : Promise<AdbScrcpyVideoStream>
-        : Promise<AdbScrcpyVideoStream> {
+    get videoStream(): MapBoolean<
+        TOptions["value"] extends { video: infer V extends boolean } ? V : true,
+        Promise<AdbScrcpyVideoStream>,
+        undefined
+    > {
         return this.#videoStream as never;
     }
 
@@ -278,8 +282,14 @@ export class AdbScrcpyClient<TOptions extends AdbScrcpyOptions<object>> {
      * Note: if it's not `undefined`, it must be consumed to prevent
      * the connection from being blocked.
      */
-    get audioStream() {
-        return this.#audioStream;
+    get audioStream(): MapBoolean<
+        TOptions["value"] extends { audio: infer A extends boolean }
+            ? A
+            : false,
+        Promise<AdbScrcpyAudioStreamMetadata>,
+        undefined
+    > {
+        return this.#audioStream as never;
     }
 
     #controller: ScrcpyControlMessageWriter | undefined;
@@ -289,11 +299,17 @@ export class AdbScrcpyClient<TOptions extends AdbScrcpyOptions<object>> {
      * On server version 1.22 and above, it will be `undefined` if
      * control is disabled by `options.control: false`.
      */
-    get controller() {
-        return this.#controller;
+    get controller(): MapBoolean<
+        TOptions["value"] extends { control: infer C extends boolean }
+            ? C
+            : true,
+        ScrcpyControlMessageWriter,
+        undefined
+    > {
+        return this.#controller as never;
     }
 
-    get clipboard(): ReadableStream<string> | undefined {
+    get clipboard(): TOptions["clipboard"] {
         return this.#options.clipboard;
     }
 
@@ -379,7 +395,7 @@ export class AdbScrcpyClient<TOptions extends AdbScrcpyOptions<object>> {
                     ...metadata,
                     stream: metadata.stream.pipeThrough(
                         this.#options.createMediaStreamTransformer(),
-                    ),
+                    ) as ReadableStream<ScrcpyAudioStreamPacket>,
                 };
             default:
                 throw new Error(

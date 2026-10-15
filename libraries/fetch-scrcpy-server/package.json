@@ -1,6 +1,6 @@
 {
     "name": "@yume-chan/fetch-scrcpy-server",
-    "version": "1.0.0",
+    "version": "3.0.0-beta.4",
     "description": "A script to download Scrcpy server binary.",
     "keywords": [
         "scrcpy"
@@ -27,10 +27,7 @@
     "main": "index.js",
     "types": "index.d.ts",
     "sideEffects": false,
-    "dependencies": {
-        "gh-release-fetch": "^4.0.3"
-    },
     "devDependencies": {
-        "@types/node": "^25.5.2"
+        "@types/node": "^26.6.4"
     }
 }

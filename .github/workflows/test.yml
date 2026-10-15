@@ -18,21 +18,28 @@ jobs:
 
         strategy:
             matrix:
-                node-version: [20, 22, 24]
+                node-version: [22, 24]
             fail-fast: false
 
         steps:
             - name: Checkout
-              uses: actions/checkout@v5
+              uses: actions/checkout@v7
 
             - name: Use Node.js ${{ matrix.node-version }}
-              uses: actions/setup-node@v6
+              uses: actions/setup-node@v7
               with:
                   node-version: ${{ matrix.node-version }}
 
-            - uses: pnpm/action-setup@v4
+            - name: Cache PNPM store
+              uses: actions/cache@v6
               with:
-                  version: 10.20.0
+                  path: |
+                      ~/.pnpm-store/v11
+                  key: ${{ runner.os }}-pnpm
+
+            - uses: pnpm/action-setup@v6
+              with:
+                  version: 11.3.0
                   run_install: true
 
             - run: pnpm run build

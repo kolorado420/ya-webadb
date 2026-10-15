@@ -1,9 +1,80 @@
-import { EventEmitter } from "@yume-chan/event";
+import { EventEmitter, StickyEventEmitter } from "@yume-chan/event";
 import type { ScrcpyVideoDecoderPerformanceCounterInterface } from "@yume-chan/scrcpy-decoder-shared";
 import { ScrcpyVideoDecoderPerformanceCounter } from "@yume-chan/scrcpy-decoder-shared";
 import { concatBuffers, TransformStream } from "@yume-chan/stream-extra";
 
 import type { CodecTransformStream } from "../codec/type.js";
+
+type State =
+    | {
+          type: "unconfigured";
+      }
+    | {
+          type: "configured";
+          /**
+           * The native decoder.
+           *
+           * `transform`, `flush` and `cancel` callbacks don't need to
+           * check `#decoder.state` for "closed".
+           *
+           * Decoder can enter "closed" state by either:
+           *   - Encounter a decoding error: this triggers `controller.error`,
+           *     so no more transformer callbacks will be called.
+           *   - Calling `close` manually: this only happens in `flush` and `cancel`,
+           *     so no more transformer callbacks will be called.
+           */
+          decoder: VideoDecoder;
+          /** Saved configuration for use when resetting/re-creating the decoder. */
+          config: CodecTransformStream.Config;
+      }
+    | {
+          type: "decoding";
+          decoder: VideoDecoder;
+          /** Saved configuration for use when resetting/re-creating the decoder. */
+          config: CodecTransformStream.Config;
+          /** Saved frames since last keyframe for use when re-creating the decoder */
+          frames: CodecTransformStream.VideoChunk[];
+      }
+    | {
+          type: "reclaimed";
+          /** Saved configuration for use when re-creating the decoder. */
+          config: CodecTransformStream.Config;
+          /** Saved frames since last keyframe for use when re-creating the decoder */
+          frames: CodecTransformStream.VideoChunk[] | undefined;
+      };
+
+function decodeFirstKeyFrame(
+    decoder: VideoDecoder,
+    config: CodecTransformStream.Config,
+    chunk: CodecTransformStream.VideoChunk,
+) {
+    decoder.decode(
+        new EncodedVideoChunk({
+            type: "key",
+            timestamp: chunk.timestamp,
+            // `lib.dom.d.ts` doesn't allow `duration` to be undefined.
+            duration: chunk.duration!,
+            data: config.raw
+                ? concatBuffers([config.raw, chunk.data])
+                : chunk.data,
+        }),
+    );
+}
+
+function decodeFrame(
+    decoder: VideoDecoder,
+    chunk: CodecTransformStream.VideoChunk,
+) {
+    decoder.decode(
+        new EncodedVideoChunk({
+            type: chunk.type,
+            timestamp: chunk.timestamp,
+            // `lib.dom.d.ts` doesn't allow `duration` to be undefined.
+            duration: chunk.duration!,
+            data: chunk.data,
+        }),
+    );
+}
 
 export class VideoDecoderStream
     extends TransformStream<
@@ -12,25 +83,32 @@ export class VideoDecoderStream
     >
     implements ScrcpyVideoDecoderPerformanceCounterInterface
 {
-    /**
-     * The native decoder.
-     *
-     * `transform`, `flush` and `cancel` callbacks don't need to
-     * check `#decoder.state` for "closed".
-     *
-     * Decoder can enter "closed" state by either:
-     *   - Encounter a decoding error: this triggers `controller.error`,
-     *     so no more transformer callbacks will be called.
-     *   - Calling `close` manually: this only happens in `flush` and `cancel`,
-     *     so no more transformer callbacks will be called.
-     */
-    #decoder!: VideoDecoder;
+    #controller!: TransformStreamDefaultController<VideoFrame>;
+
+    #state: State = { type: "unconfigured" };
+
+    #hardwareAcceleration = new StickyEventEmitter<
+        Exclude<CodecTransformStream.Config["hardwareAcceleration"], undefined>
+    >({
+        initialValue: "no-preference",
+        equals: (a, b) => a === b,
+    });
+    get hardwareAcceleration() {
+        return this.#hardwareAcceleration.value;
+    }
+    get onHardwareAccelerationChange() {
+        return this.#hardwareAcceleration.event;
+    }
 
     /**
      * Gets the number of frames waiting to be decoded.
      */
     get decodeQueueSize() {
-        return this.#decoder.decodeQueueSize;
+        if ("decoder" in this.#state) {
+            return this.#state.decoder.decodeQueueSize;
+        }
+
+        return 0;
     }
 
     #onDequeue = new EventEmitter<undefined>();
@@ -61,50 +139,63 @@ export class VideoDecoderStream
         return this.#counter.decoderResetCount;
     }
 
-    /**
-     * Saved decoder configuration for use when resetting the native decoder.
-     */
-    #config?: CodecTransformStream.Config;
-
-    #configured = false;
-
     #abortController = new AbortController();
+    #skipFramesBefore = -1;
 
     constructor() {
-        let decoder!: VideoDecoder;
+        let controller!: TransformStreamDefaultController<VideoFrame>;
 
         super({
-            start: (controller) => {
+            start: (controller_) => {
                 // WARN: can't use `this` here
-
-                decoder = new VideoDecoder({
-                    output: (frame) => {
-                        this.#counter.increaseFramesDecoded();
-                        controller.enqueue(frame);
-                    },
-                    error: (error) => {
-                        // Propagate decoder error to stream.
-                        controller.error(error);
-                        this.#dispose();
-                    },
-                });
+                controller = controller_;
             },
-            transform: (chunk) => {
+            transform: async (chunk) => {
                 if ("codec" in chunk) {
-                    this.#config = chunk;
-                    this.#configured = false;
+                    this.#hardwareAcceleration.fire(
+                        chunk.hardwareAcceleration ?? "no-preference",
+                    );
+                    // Validate the config by creating decoder right away
+                    switch (this.#state.type) {
+                        case "unconfigured":
+                        case "reclaimed":
+                            this.#state = {
+                                type: "configured",
+                                decoder: this.#createDecoder(chunk),
+                                config: chunk,
+                            };
+                            break;
+                        // @ts-expect-error: intentional case fallthrough
+                        case "decoding":
+                            await this.#state.decoder.flush();
+                        // fallthrough
+                        case "configured":
+                            // Reuse the existing decoder.
+                            // `decoder` is definitely in "configured" state,
+                            // otherwise the stream is in error state
+                            // and no `transform` callbacks will be called.
+                            this.#state.decoder.configure(chunk);
+                            this.#state = {
+                                type: "configured",
+                                decoder: this.#state.decoder,
+                                config: chunk,
+                            };
+                            break;
+                    }
                     return;
                 }
 
                 this.#handleVideoChunk(chunk);
             },
             flush: async () => {
-                // `flush` can only be called when `state` is "configured".
-                if (this.#decoder.state === "configured") {
-                    // Wait for all queued frames to be decoded when
-                    // `writable` side ends without exception.
-                    // The `readable` side will wait for `flush` to complete before closing.
-                    await this.#decoder.flush();
+                // only call `flush` when `decoder.state` is "configured".
+                if (
+                    "decoder" in this.#state &&
+                    this.#state.decoder.state === "configured"
+                ) {
+                    // This also delays closing `readable` and `writable` streams
+                    // (if they are not in error state) until all frames are decoded.
+                    await this.#state.decoder.flush();
                 }
                 this.#dispose();
             },
@@ -114,107 +205,209 @@ export class VideoDecoderStream
             },
         });
 
-        this.#decoder = decoder;
-        this.#decoder.addEventListener(
-            "dequeue",
-            () => this.#onDequeue.fire(undefined),
-            { signal: this.#abortController.signal },
-        );
+        this.#controller = controller;
     }
 
     #handleVideoChunk(chunk: CodecTransformStream.VideoChunk) {
-        if (!this.#config) {
-            throw new Error("Decoder not configured");
-        }
+        switch (this.#state.type) {
+            case "unconfigured":
+                throw new Error("Decoder not configured");
+            case "configured": {
+                if (chunk.type === "delta") {
+                    throw new Error("Expect a keyframe but got a delta frame");
+                }
 
-        if (chunk.type === "key") {
-            if (this.#decoder.decodeQueueSize) {
-                // If the device is too slow to decode all frames,
-                // discard queued frames when next keyframe arrives.
-                // (decoding can only start from keyframes)
-                // This limits the maximum latency to 1 keyframe interval
-                // (60 frames by default).
-                this.#counter.addFramesSkippedDecoding(
-                    this.#decoder.decodeQueueSize,
+                decodeFirstKeyFrame(
+                    this.#state.decoder,
+                    this.#state.config,
+                    chunk,
                 );
-                this.#counter.increaseResetCount();
-                this.#decoder.reset();
 
-                // `reset` also resets the decoder configuration
-                // so we need to re-configure it again.
-                this.#configureAndDecodeFirstKeyFrame(this.#config, chunk);
-                return;
+                this.#state = {
+                    type: "decoding",
+                    decoder: this.#state.decoder,
+                    config: this.#state.config,
+                    frames: [chunk],
+                };
+                break;
             }
+            case "decoding":
+                if (chunk.type === "key") {
+                    this.#state.frames.length = 0;
+                }
+                this.#state.frames.push(chunk);
 
-            if (!this.#configured) {
-                this.#configureAndDecodeFirstKeyFrame(this.#config, chunk);
-                return;
+                decodeFrame(this.#state.decoder, chunk);
+                break;
+            case "reclaimed": {
+                const decoder = this.#createDecoder(this.#state.config);
+
+                if (chunk.type === "key") {
+                    decodeFirstKeyFrame(decoder, this.#state.config, chunk);
+
+                    this.#state = {
+                        type: "decoding",
+                        decoder: decoder,
+                        config: this.#state.config,
+                        frames: [chunk],
+                    };
+                    return;
+                }
+
+                if (!this.#state.frames) {
+                    // Reclaimed when configured but no frames have been decoded yet,
+                    // so a keyframe is required to start decoding.
+                    throw new Error("Expect a keyframe but got a delta frame");
+                }
+
+                decodeFirstKeyFrame(
+                    decoder,
+                    this.#state.config,
+                    this.#state.frames[0]!,
+                );
+
+                // `chunk`s must have monotonic timestamps, so we can skip all frames before `chunk`.
+                this.#skipFramesBefore = chunk.timestamp;
+                this.#state.frames.push(chunk);
+
+                for (const frame of this.#state.frames.slice(1)) {
+                    decodeFrame(decoder, frame);
+                }
+
+                this.#state = {
+                    type: "decoding",
+                    decoder: decoder,
+                    config: this.#state.config,
+                    frames: this.#state.frames,
+                };
+
+                break;
             }
-
-            this.#decoder.decode(
-                // `type` has been checked to be "key"
-                new EncodedVideoChunk(chunk as EncodedVideoChunkInit),
-            );
-            return;
         }
-
-        if (!this.#configured) {
-            if (chunk.type === undefined) {
-                // Infer the first frame after configuration as keyframe
-                // (`VideoDecoder` will throw error if it's not)
-                this.#configureAndDecodeFirstKeyFrame(this.#config, chunk);
-                return;
-            }
-
-            throw new Error("Expect a keyframe but got a delta frame");
-        }
-
-        this.#decoder.decode(
-            new EncodedVideoChunk({
-                // Treat `undefined` as "key" otherwise it won't decode
-                type: chunk.type ?? "key",
-                timestamp: chunk.timestamp,
-                duration: chunk.duration!,
-                data: chunk.data,
-            }),
-        );
     }
 
-    #configureAndDecodeFirstKeyFrame(
-        config: CodecTransformStream.Config,
-        chunk: CodecTransformStream.VideoChunk,
-    ) {
-        this.#decoder.configure(config);
-        this.#configured = true;
+    #createDecoder(config: CodecTransformStream.Config) {
+        const decoder = new VideoDecoder({
+            output: (frame) => {
+                if (frame.timestamp < this.#skipFramesBefore) {
+                    frame.close();
+                    return;
+                }
 
-        if (config.raw) {
-            this.#decoder.decode(
-                new EncodedVideoChunk({
-                    type: "key",
-                    timestamp: chunk.timestamp,
-                    duration: chunk.duration!,
-                    data: concatBuffers([config.raw, chunk.data]),
-                }),
+                this.#counter.increaseFramesDecoded();
+                try {
+                    this.#controller.enqueue(frame);
+                } catch {
+                    // `controller` is closed
+                    frame.close();
+                }
+            },
+            // eslint-disable-next-line @typescript-eslint/no-misused-promises
+            error: async (error) => {
+                if (error.name === "QuotaExceededError") {
+                    // Chrome reclaims inactive `VideoDecoder`'s after 90 seconds
+                    // (for example due to pausing decoding when the document is hidden).
+                    // https://source.chromium.org/chromium/chromium/src/+/main:third_party/blink/renderer/modules/webcodecs/reclaimable_codec.cc;l=181;drc=aba14550ed0b4620deb59e7c5f551cbde8970fb3
+                    // Reset states, it will be recreated in next `transform` call.
+                    switch (this.#state.type) {
+                        case "unconfigured":
+                        case "reclaimed":
+                            // Don't throw, report errors to stream
+                            this.#controller.error(
+                                new Error(
+                                    "Unexpected state when reclaiming decoder",
+                                ),
+                            );
+                            this.#dispose();
+                            return;
+                        case "configured":
+                            // Unlike `transform` callback,
+                            // this doesn't re-create the decoder immediately,
+                            // because the config has already been validated,
+                            // and since browser reclaims the decoder to save hardware resources,
+                            // we don't want to undo that by creating a new decoder immediately.
+                            this.#state = {
+                                type: "reclaimed",
+                                config,
+                                frames: undefined,
+                            };
+                            break;
+                        case "decoding":
+                            this.#state = {
+                                type: "reclaimed",
+                                config,
+                                frames: this.#state.frames,
+                            };
+                            break;
+                    }
+                    return;
+                }
+
+                // Maybe the decoder is hardware accelerated but the hardware has an issue,
+                // retry with software decoder.
+                if (
+                    error.name === "EncodingError" &&
+                    this.#state.type === "decoding" &&
+                    config.hardwareAcceleration !== "prefer-software"
+                ) {
+                    config.hardwareAcceleration = "prefer-software";
+                    // Codecs like H.265 only support hardware acceleration,
+                    // so we need to check if the software decoder is supported.
+                    const support =
+                        await VideoDecoder.isConfigSupported(config);
+                    if (support.supported) {
+                        const decoder = this.#createDecoder(config);
+
+                        // Replay frames with rendering skipping
+                        this.#skipFramesBefore =
+                            this.#state.frames.at(-1)!.timestamp;
+                        decodeFirstKeyFrame(
+                            decoder,
+                            config,
+                            this.#state.frames[0]!,
+                        );
+                        for (const frame of this.#state.frames.slice(1)) {
+                            decodeFrame(decoder, frame);
+                        }
+
+                        // Update state
+                        this.#hardwareAcceleration.fire("prefer-software");
+                        this.#state.decoder = decoder;
+                        return;
+                    }
+                }
+
+                // Propagate other decoder errors to stream.
+                this.#controller.error(error);
+                this.#dispose();
+            },
+        });
+
+        // `dequeue` event added in Chrome 106,
+        // before that `VideoDecoder` is not a `EventTarget`
+        if (typeof decoder.addEventListener === "function") {
+            decoder.addEventListener(
+                "dequeue",
+                () => this.#onDequeue.fire(undefined),
+                { signal: this.#abortController.signal },
             );
-            return;
         }
 
-        this.#decoder.decode(
-            new EncodedVideoChunk({
-                type: "key",
-                timestamp: chunk.timestamp,
-                duration: chunk.duration!,
-                data: chunk.data,
-            }),
-        );
+        decoder.configure(config);
+
+        return decoder;
     }
 
     #dispose() {
         this.#abortController.abort();
         this.#onDequeue.dispose();
 
-        if (this.#decoder.state !== "closed") {
-            this.#decoder.close();
+        if (
+            "decoder" in this.#state &&
+            this.#state.decoder.state !== "closed"
+        ) {
+            this.#state.decoder.close();
         }
+        this.#state = { type: "unconfigured" };
     }
 }

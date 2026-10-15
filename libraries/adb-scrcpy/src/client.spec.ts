@@ -95,40 +95,13 @@ describe("AdbScrcpyClient", () => {
             }
         });
 
-        it("should be a union when video: undefined", async () => {
-            if (TypeOnlyTest) {
-                const client = await AdbScrcpyClient.start(
-                    adb,
-                    DefaultServerPath,
-                    new AdbScrcpyOptions2_1({}),
-                );
-                expect(
-                    equal<Promise<AdbScrcpyVideoStream> | undefined>()(
-                        client.videoStream,
-                    ),
-                );
-            }
-
-            if (TypeOnlyTest) {
-                const client = await AdbScrcpyClient.start(
-                    adb,
-                    DefaultServerPath,
-                    new AdbScrcpyOptions3_1({}),
-                );
-                expect(
-                    equal<Promise<AdbScrcpyVideoStream> | undefined>()(
-                        client.videoStream,
-                    ),
-                );
-            }
-        });
-
         it("should be a union when video: boolean", async () => {
             if (TypeOnlyTest) {
+                const random = Math.random() < 0.5;
                 const client = await AdbScrcpyClient.start(
                     adb,
                     DefaultServerPath,
-                    new AdbScrcpyOptions2_1({ video: true as boolean }),
+                    new AdbScrcpyOptions2_1({ video: random }),
                 );
                 expect(
                     equal<Promise<AdbScrcpyVideoStream> | undefined>()(
@@ -138,10 +111,11 @@ describe("AdbScrcpyClient", () => {
             }
 
             if (TypeOnlyTest) {
+                const random = Math.random() < 0.5;
                 const client = await AdbScrcpyClient.start(
                     adb,
                     DefaultServerPath,
-                    new AdbScrcpyOptions3_1({ video: true as boolean }),
+                    new AdbScrcpyOptions3_1({ video: random }),
                 );
                 expect(
                     equal<Promise<AdbScrcpyVideoStream> | undefined>()(

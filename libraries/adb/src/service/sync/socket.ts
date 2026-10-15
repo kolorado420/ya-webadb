@@ -21,7 +21,15 @@ import { ResponseId } from "./id/index.js";
 
 const NumberRequest = struct({ id: u32, arg: u32 }, { littleEndian: true });
 
-class AdbSyncError extends Error {}
+const AdbSyncErrorBrand = Symbol.for("AdbSyncError.brand");
+
+class AdbSyncError extends Error {
+    [AdbSyncErrorBrand] = true;
+
+    static override [Symbol.hasInstance](value: unknown) {
+        return !!(value as AdbSyncError | undefined)?.[AdbSyncErrorBrand];
+    }
+}
 export { AdbSyncError as Error };
 
 const FailResponse = struct(
@@ -34,16 +42,27 @@ const FailResponse = struct(
     },
 );
 
+function i32ToHex(i: number) {
+    return "0x" + i.toString(16).padStart(8, "0");
+}
+
+let NextId = 0;
+
 export class Socket implements AsyncExactReadable {
     static readonly NumberRequest = NumberRequest;
     static readonly FailResponse = FailResponse;
 
+    #id: number;
     readonly #socket: Adb.Socket;
     readonly #writer: WritableStreamDefaultWriter<MaybeConsumable<Uint8Array>>;
     readonly #readable: BufferedReadableStream;
     readonly #writeLock = new AutoResetEvent();
     readonly #combiner: BufferCombiner;
     #idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    get id() {
+        return this.#id;
+    }
 
     get position() {
         return this.#readable.position;
@@ -54,6 +73,9 @@ export class Socket implements AsyncExactReadable {
     }
 
     constructor(socket: Adb.Socket, bufferSize: number) {
+        this.#id = NextId;
+        NextId += 1;
+
         this.#socket = socket;
         this.#writer = socket.writable.getWriter();
         this.#readable = new BufferedReadableStream(socket.readable);
@@ -69,6 +91,10 @@ export class Socket implements AsyncExactReadable {
     startIdleTimer(timeout: number, callback: () => void) {
         this.clearIdleTimer();
         this.#idleTimeoutId = setTimeout(callback, timeout);
+        if (typeof this.#idleTimeoutId === "object") {
+            // Node.js: unref the timer so that it won't keep the process alive
+            (this.#idleTimeoutId as { unref?: () => void }).unref?.();
+        }
     }
 
     /**
@@ -158,14 +184,15 @@ export class Socket implements AsyncExactReadable {
     }
 
     async *readResponses<T>(
-        id: number,
+        expectedId: number,
         type: StructDeserializer<T>,
     ): AsyncGenerator<T, void, void> {
         await this.flush();
 
         while (true) {
             const buffer = await this.#readable.readExactly(4);
-            switch (getUint32LittleEndian(buffer, 0)) {
+            const actualId = getUint32LittleEndian(buffer, 0);
+            switch (actualId) {
                 case ResponseId.Fail:
                     await FailResponse.deserialize(this.#readable);
                     unreachable();
@@ -176,13 +203,13 @@ export class Socket implements AsyncExactReadable {
                     // but `DONE` responses for `STAT` requests are 12 bytes (same as `STAT` responses).
                     await this.#readable.readExactly(type.size);
                     return;
-                case id:
+                case expectedId:
                     yield await type.deserialize(this.#readable);
                     break;
                 default:
                     // non-recoverable
                     throw new Error(
-                        `Expected '${id}' or '${ResponseId.Done}', but got '${decodeUtf8(buffer)}'`,
+                        `Expected ${i32ToHex(expectedId)} or ${i32ToHex(ResponseId.Done)}, but got ${i32ToHex(actualId)}`,
                     );
             }
         }
